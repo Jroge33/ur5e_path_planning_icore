@@ -7,6 +7,7 @@
   <license>Apache 2.0</license>
 
   <author email="todo@lsu.edu">Jude Rogers</author>
+  <maintainer email="todo@lsu.edu">Jude Rogers</maintainer>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
