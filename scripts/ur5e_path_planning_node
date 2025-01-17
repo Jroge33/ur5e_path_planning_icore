@@ -1,0 +1,634 @@
+#!/usr/bin/env python
+from __future__ import with_statement
+from __future__ import division
+from __future__ import absolute_import
+import sys
+import rospy
+import copy
+import moveit_commander
+import moveit_msgs.msg
+import geometry_msgs.msg
+from math import pi
+from std_msgs.msg import String
+from moveit_commander.conversions import pose_to_list
+import re
+import numpy as np
+from scipy.spatial.transform import Rotation
+from geometry_msgs.msg import Pose, Point, Quaternion
+from visualization_msgs.msg import Marker, MarkerArray
+from itertools import izip
+from io import open
+from itertools import imap
+import rospkg
+import sensor_msgs.point_cloud2 as pc2
+from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs.msg import Header
+
+
+
+def all_close(goal, actual, tolerance):
+  u"""
+  Convenience method for testing if a list of values are within a tolerance of their counterparts in another list
+  @param: goal       A list of floats, a Pose or a PoseStamped
+  @param: actual     A list of floats, a Pose or a PoseStamped
+  @param: tolerance  A float
+  @returns: bool
+  """
+  all_equal = True
+  if type(goal) is list:
+    for index in xrange(len(goal)):
+      if abs(actual[index] - goal[index]) > tolerance:
+        return False
+
+  elif type(goal) is geometry_msgs.msg.PoseStamped:
+    return all_close(goal.pose, actual.pose, tolerance)
+
+  elif type(goal) is geometry_msgs.msg.Pose:
+    return all_close(pose_to_list(goal), pose_to_list(actual), tolerance)
+
+  return True
+
+class MoveGroupPythonIntefaceTutorial(object):
+  u"""MoveGroupPythonIntefaceTutorial"""
+  def __init__(self):
+    super(MoveGroupPythonIntefaceTutorial, self).__init__()
+
+    rp = rospkg.RosPack()
+    file_path = rp.get_path('my_tutorial') + '/src/wingblade_v2.nc'
+    print(file_path)
+    parsed_variables = self.parse_gcode(file_path)
+    s = list(izip(parsed_variables[u'A'],parsed_variables[u'B'],parsed_variables[u'C'],parsed_variables[u'X'],parsed_variables[u'Y'],parsed_variables[u'Z']))
+
+    test_path = np.transpose([[0.1905834],[-0.1805051],[-0.7734477],[-0.135413697049],[-0.624190995654],[1.49887050785]])
+
+    ## BEGIN_SUB_TUTORIAL setup
+    ##
+    ## First initialize `moveit_commander`_ and a `rospy`_ node:
+    moveit_commander.roscpp_initialize(sys.argv)
+    rospy.init_node(u'move_group_python_interface_tutorial',
+                    anonymous=True, log_level=rospy.DEBUG)
+  
+      ## We create a `DisplayTrajectory`_ publisher which is used later to publish
+    ## trajectories for RViz to visualize:
+    display_trajectory_publisher = rospy.Publisher(u'/group/display_planned_path',
+                                                   moveit_msgs.msg.DisplayTrajectory,
+                                                   queue_size=20)
+    self.marker_pub = rospy.Publisher(u'visualization_marker_array', MarkerArray, queue_size=10)
+       # Set the publishing rate
+    self.rate = rospy.Rate(10)  # 10 Hz
+    ## Instantiate a `RobotCommander`_ object. This object is the outer-level interface to
+    ## the robot:
+    robot = moveit_commander.RobotCommander()
+
+    ## Instantiate a `PlanningSceneInterface`_ object.  This object is an interface
+    ## to the world surrounding the robot:
+    scene = moveit_commander.PlanningSceneInterface()
+
+
+    ## Instantiate a `MoveGroupCommander`_ object.  This object is an interface
+    ## to one group of joints.  In this case the group is the joints in the Panda
+    ## arm so we set ``group_name = panda_arm``. If you are using a different robot,
+    ## you should change this value to the name of your robot arm planning group.
+    ## This interface can be used to plan and execute motions on the Panda:
+    group_name = str("ur5e")
+    group = moveit_commander.MoveGroupCommander(group_name)
+
+    ## END_SUB_TUTORIAL
+
+    ## BEGIN_SUB_TUTORIAL basic_info
+    ##
+    ## Getting Basic Information
+    ## ^^^^^^^^^^^^^^^^^^^^^^^^^
+    # We can get the name of the reference frame for this robot:
+    planning_frame = group.get_planning_frame()
+    #print "============ Reference frame: %s" % planning_frame
+
+    # We can also print the name of the end-effector link for this group:
+    eef_link = group.get_end_effector_link()
+    #print "============ End effector: %s" % eef_link
+
+    # We can get a list of all the groups in the robot:
+    group_names = robot.get_group_names()
+    #print "============ Robot Groups:", robot.get_group_names()
+
+    # Sometimes for debugging it is useful to print the entire state of the
+    # robot:
+    #print "============ Printing robot state"
+    # print robot.get_current_state()
+    # print ""5
+    ## END_SUB_TUTORIAL
+
+    # Misc variables
+    self.box_name = u''
+    self.robot = robot
+    self.scene = scene
+    self.group = group
+    self.display_trajectory_publisher = display_trajectory_publisher
+    self.planning_frame = planning_frame
+    self.eef_link = eef_link
+    self.group_names = group_names
+
+    self.waypoints = self.euler2quant(s)
+    # self.waypoints = self.euler2quant(test_path)
+    
+    self.markers = self.store_markers(self.waypoints)
+
+  def generate_point_cloud(self):
+      # Example: Generating random 3D points
+      num_points = 100
+      points = np.random.rand(num_points, 3) * 10  # Generate points between 0 and 10 in each dimension
+
+      # Prepare the header for the PointCloud2 message
+      header = Header()
+      header.stamp = rospy.Time.now()
+      header.frame_id = "robot_base_footprint"  # Set your desired frame_id here
+
+      # Create PointCloud2 fields
+      fields = [
+          PointField('x', 0, PointField.FLOAT32, 1),
+          PointField('y', 4, PointField.FLOAT32, 1),
+          PointField('z', 8, PointField.FLOAT32, 1),
+      ]
+
+      # Pack the point cloud data into the PointCloud2 message
+      point_cloud_msg = pc2.create_cloud(header, fields, points)
+
+      return point_cloud_msg
+
+  def point_cloud_publisher(self):
+      point_cloud_pub = rospy.Publisher(u'/move_group/filtered_cloud', PointCloud2, queue_size=10)
+
+      rate = rospy.Rate(1)  # 1 Hz, adjust to your needs
+
+      while not rospy.is_shutdown():
+          point_cloud = self.generate_point_cloud()
+          point_cloud_pub.publish(point_cloud)
+          rospy.loginfo("Published point cloud")
+          rate.sleep()
+
+  def euler2quant(self, waypoints):
+    # Define the translation and rotation parameters
+    T = [-109.01, -428.88, 805.05, 0, -np.pi/2, np.pi]
+    # T = [-109.01, 428.88, 705.05, 0, -np.pi/2, 0]
+    # T = [-109.01, -428.88, 1105.05, -np.pi/2, -np.pi/2, -np.pi/2]
+    
+    # Create the translation matrix
+    translation_matrix = np.array([
+        [1, 0, 0, T[0]],
+        [0, 1, 0, T[1]],
+        [0, 0, 1, T[2]],
+        [0, 0, 0, 1]
+    ])
+    
+    # Create the rotation matrices for x, y, z
+    Rx = np.array([
+        [1, 0, 0],
+        [0, np.cos(T[3]), -np.sin(T[3])],
+        [0, np.sin(T[3]), np.cos(T[3])]
+    ])
+    
+    Ry = np.array([
+        [np.cos(T[4]), 0, np.sin(T[4])],
+        [0, 1, 0],
+        [-np.sin(T[4]), 0, np.cos(T[4])]
+    ])
+    
+    Rz = np.array([
+        [np.cos(T[5]), -np.sin(T[5]), 0],
+        [np.sin(T[5]), np.cos(T[5]), 0],
+        [0, 0, 1]
+    ])
+    
+    # Combine rotation matrices
+    rotation_matrix = np.dot(np.dot(Rz,Ry),Rx)
+    
+    # Combine translation and rotation into a single transformation matrix
+    transformation_matrix = np.eye(4)
+    transformation_matrix[:3, :3] = rotation_matrix
+    transformation_matrix[:4, 3] = translation_matrix[:4, 3]
+    
+    # Convert waypoints to homogeneous coordinates
+    waypoints = np.array(waypoints).transpose()
+    num_waypoints = waypoints.shape[1]
+    waypoints_augmented = np.ones((4, num_waypoints))
+    waypoints_augmented[:3, :] = waypoints[2:5, :]  # Assuming the input needs to be adjusted
+    
+    # Apply the transformation
+    transformed_waypoints = np.dot(transformation_matrix,waypoints_augmented)
+    
+    # Extract the transformed positions
+    positions = transformed_waypoints[:3].transpose() * 0.001  # Scale to meters
+    
+    # Convert to quaternions
+    rot = Rotation.from_euler(u'xyz', positions, degrees=True)
+    quaternions = rot.as_quat()
+    
+    # Prepare Pose objects
+    poses = []
+    for i in xrange(num_waypoints):
+        position = Point(positions[i, 0], positions[i, 1], positions[i, 2])
+        quaternion = Quaternion(quaternions[i, 0], quaternions[i, 1], quaternions[i, 2], quaternions[i, 3])
+        pose = Pose(position=position, orientation=quaternion)
+        poses.append(pose)
+    
+    return poses
+
+  def store_markers(self, poses):
+    marker_array = MarkerArray()
+    for i, pose in enumerate(poses):
+        marker = Marker()
+        marker.header.frame_id = u"robot_base_footprint"  # or any other frame you are using
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = u"waypoints"
+        marker.id = i
+        marker.type = Marker.SPHERE  # or SPHERE, CUBE, etc.
+        marker.action = Marker.ADD
+
+        # Set the pose of the marker
+        marker.pose = pose
+
+        # Set the scale of the marker (adjust as necessary)
+        marker.scale.x = 0.005  # Arrow length
+        marker.scale.y = 0.005 # Arrow width
+        marker.scale.z = 0.005  # Arrow height
+
+        # Set the color of the marker (adjust as necessary)
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0  # Alpha (transparency)
+
+        # Add the marker to the array
+        marker_array.markers.append(marker)
+    return marker_array
+  
+  def parse_gcode(self, file_path):
+      variables = {u'A': [], u'B': [], u'C': [], u'X': [], u'Y': [], u'Z': []}
+      with open(file_path, u'r') as file:
+          for line in file:
+              line = line.strip()  # Remove leading/trailing whitespaces
+              if line.startswith(u';'):
+                  continue  # Skip comments
+              for variable in variables.keys():
+                  values = re.findall(u'%s([-+]?\d*\.?\d+)' % variable, line)  # Extract values for the variable
+                  if values:
+                      variables[variable].extend(imap(float, values))  # Append values to the variable list
+      return variables
+     
+  def move_to_pose(self, pose):
+      self.group.set_pose_target(pose)
+      plan = self.group.go()
+      self.group.stop()
+      self.group.clear_pose_targets()
+      return plan
+
+  def move_through_waypoints(self, waypoints):
+      # Plan the Cartesian path connecting the waypoints
+      (plan, fraction) = self.group.compute_cartesian_path(
+          waypoints,   # waypoints to follow
+          0.01,        # eef_step
+          0.0)         # jump_threshold
+
+      if fraction < 1.0:
+          rospy.logwarn("Only %.2f%% of the path was planned successfully.", fraction * 100)
+    
+      if plan:
+          # Execute the planned path
+          self.group.execute(plan, wait=True)
+      else:
+        rospy.logerr("Failed to plan the path.")
+
+  def move_between_poses(self, pose_list):
+      for pose in pose_list:
+          # print ("Moving to pose: %s" % pose)
+          self.group.go(pose, wait=True)
+
+  def go_to_joint_state(self):
+    # Copy class variables to local variables to make the web tutorials more clear.
+    # In practice, you should use the class variables directly unless you have a good
+    # reason not to.
+    group = self.group
+
+    ## BEGIN_SUB_TUTORIAL plan_to_joint_state
+    ##
+    ## Planning to a Joint Goal
+    ## ^^^^^^^^^^^^^^^^^^^^^^^^
+    ## The Panda's zero configuration is at a `singularity <https://www.quora.com/Robotics-What-is-meant-by-kinematic-singularity>`_ so the first
+    ## thing we want to do is move it to a slightly better configuration.
+    # We can get the joint values from the group and adjust some of the values:
+    joint_goal = group.get_current_joint_values()
+    joint_goal[0] = pi/4
+    joint_goal[1] = -pi/4
+    joint_goal[2] = 0
+    joint_goal[3] = -pi/2
+    joint_goal[4] = 0
+    joint_goal[5] = pi/3
+
+    # The go command can be called with joint values, poses, or without any
+    # parameters if you have already set the pose or joint target for the group
+    group.go(joint_goal, wait=True)
+
+    # Calling ``stop()`` ensures that there is no residual movement
+    group.stop()
+
+    ## END_SUB_TUTORIAL
+
+    # For testing:return
+    # Note that since this section of code will not be included in the tutorials
+    # we use the class variable rather than the copied state variable
+    current_joints = self.group.get_current_joint_values()
+    return all_close(joint_goal, current_joints, 0.01)
+
+  def go_to_pose_goal(self):
+    # Copy class variables to local variables to make the web tutorials more clear.
+    # In practice, you should use the class variables directly unless you have a good
+    # reason not to.
+    group = self.group
+
+    ## BEGIN_SUB_TUTORIAL plan_to_pose
+    ##
+    ## Planning to a Pose Goal
+    ## ^^^^^^^^^^^^^^^^^^^^^^^
+    ## We can plan a motion for this group to a desired pose for the
+    ## end-effector:
+    pose_goal = geometry_msgs.msg.Pose()
+    pose_goal.orientation.x = -0.00305928411871
+    pose_goal.orientation.y = -0.00149309225919
+    pose_goal.orientation.z = 0.0051326569621
+    pose_goal.orientation.w = 0.999981033464
+    pose_goal.position.x = -0.11210439488
+    pose_goal.position.y = -0.4101289129
+    pose_goal.position.z = 0.733173300076
+    group.set_pose_target(pose_goal)
+
+    ## Now, we call the planner to compute the plan and execute it.
+    self.plan = group.go(wait=True)
+    # Calling `stop()` ensures that there is no residual movement
+    group.stop()
+    # It is always good to clear your targets after planning with poses.
+    # Note: there is no equivalent function for clear_joint_value_targets()
+    group.clear_pose_targets()
+
+    ## END_SUB_TUTORIAL
+
+    # For testing:
+    # Note that since this section of code will not be included in the tutorials
+    # we use the class variable rather than the copied state variable
+    current_pose = self.group.get_current_pose().pose
+    return all_close(pose_goal, current_pose, 0.01)
+
+  def plan_cartesian_path(self, scale=1):
+    # Copy class variables to local variables to make the web tutorials more clear.
+    # In practice, you should use the class variables directly unless you have a good
+    # reason not to.
+    group = self.group
+
+    ## BEGIN_SUB_TUTORIAL plan_cartesian_path
+    ##
+    ## Cartesian Paths
+    ## ^^^^^^^^^^^^^^^
+    ## You can plan a Cartesian path directly by specifying a list of waypoints
+    ## for the end-effector to go through:
+    ##
+
+
+    waypoints = self.waypoints
+
+    wpose = group.get_current_pose().pose
+    wpose.position.z -= scale * 0.1  # First move up (z)
+    wpose.position.y += scale * 0.2  # and sideways (y)
+    waypoints.append(copy.deepcopy(wpose))
+
+    wpose.position.x += scale * 0.1  # Second move forward/backwards in (x)
+    waypoints.append(copy.deepcopy(wpose))
+
+    wpose.position.y -= scale * 0.1  # Third move sideways (y)
+    waypoints.append(copy.deepcopy(wpose))
+
+    # We want the Cartesian path to be interpolated at a resolution of 1 cm
+    # which is why we will specify 0.01 as the eef_step in Cartesian
+    # translation.  We will disable the jump threshold by setting it to 0.0 disabling:
+    (plan, fraction) = group.compute_cartesian_path(
+                                       waypoints,   # waypoints to follow
+                                       0.01,        # eef_step
+                                       0.0)         # jump_threshold
+
+    # Note: We are just planning, not asking move_group to actually move the robot yet:
+    print(plan)
+    return plan, fraction
+    
+
+    ## END_SUB_TUTORIAL
+
+  def display_trajectory(self, plan):
+    # Copy class variables to local variables to make the web tutorials more clear.
+    # In practice, you should use the class variables directly unless you have a good
+    # reason not to.
+    robot = self.robot
+    display_trajectory_publisher = self.display_trajectory_publisher
+
+    ## BEGIN_SUB_TUTORIAL display_trajectory
+    ##
+    ## Displaying a Trajectory
+    ## ^^^^^^^^^^^^^^^^^^^^^^^
+    ## You can ask RViz to visualize a plan (aka trajectory) for you. But the
+    ## group.plan() method does this automatically so this is not that useful
+    ## here (it just displays the same trajectory again):
+    ##
+    ## A `DisplayTrajectory`_ msg has two primary fields, trajectory_start and trajectory.
+    ## We populate the trajectory_start with our current robot state to copy over
+    ## any AttachedCollisionObjects and add our plan to the trajectory.
+    display_trajectory = moveit_msgs.msg.DisplayTrajectory()
+    display_trajectory.trajectory_start = robot.get_current_state()
+    display_trajectory.trajectory.append(plan)
+    # Publish
+    display_trajectory_publisher.publish(display_trajectory)
+
+    ## END_SUB_TUTORIAL
+
+  def execute_plan(self, plan):
+    # Copy class variables to local variables to make the web tutorials more clear.
+    # In practice, you should use the class variables directly unless you have a good
+    # reason not to.
+    group = self.group
+
+    ## BEGIN_SUB_TUTORIAL execute_plan
+    ##
+    ## Executing a Plan
+    ## ^^^^^^^^^^^^^^^^
+    ## Use execute if you would like the robot to follow
+    ## the plan that has already been computed:
+    group.execute(plan, wait=True)
+
+    ## **Note:** The robot's current joint state must be within some tolerance of the
+    ## first waypoint in the `RobotTrajectory`_ or ``execute()`` will fail
+    ## END_SUB_TUTORIAL
+
+  def wait_for_state_update(self, box_is_known=False, box_is_attached=False, timeout=4):
+    # Copy class variables to local variables to make the web tutorials more clear.
+    # In practice, you should use the class variables directly unless you have a good
+    # reason not to.
+    box_name = self.box_name
+    scene = self.scene
+
+    ## BEGIN_SUB_TUTORIAL wait_for_scene_update
+    ##
+    ## Ensuring Collision Updates Are Receieved
+    ## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ## If the Python node dies before publishing a collision object update message, the message
+    ## could get lost and the box will not appear. To ensure that the updates are
+    ## made, we wait until we see the changes reflected in the
+    ## ``get_known_object_names()`` and ``get_known_object_names()`` lists.
+    ## For the purpose of this tutorial, we call this function after adding,
+    ## removing, attaching or detaching an object in the planning scene. We then wait
+    ## until the updates have been made or ``timeout`` seconds have passed
+    start = rospy.get_time()
+    seconds = rospy.get_time()
+    while (seconds - start < timeout) and not rospy.is_shutdown():
+      # Test if the box is in attached objects
+      attached_objects = scene.get_attached_objects([box_name])
+      is_attached = len(attached_objects.keys()) > 0
+
+      # Test if the box is in the scene.
+      # Note that attaching the box will remove it from known_objects
+      is_known = box_name in scene.get_known_object_names()
+
+      # Test if we are in the expected state
+      if (box_is_attached == is_attached) and (box_is_known == is_known):
+        return True
+
+      # Sleep so that we give other threads time on the processor
+      rospy.sleep(0.1)
+      seconds = rospy.get_time()
+
+    # If we exited the while loop without returning then we timed out
+    return False
+    ## END_SUB_TUTORIAL
+
+  #def add_box(self, timeout=4):
+    ## Copy class variables to local variables to make the web tutorials more clear.
+    ## In practice, you should use the class variables directly unless you have a good
+    ## reason not to.
+    #box_name = self.box_name
+    #scene = self.scene
+
+    ## BEGIN_SUB_TUTORIAL add_box
+    ##
+    ## Adding Objects to the Planning Scene
+    ## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ## First, we will create a box in the planning scene at the location of the left finger:
+    #box_pose = geometry_msgs.msg.PoseStamped()
+    #box_pose.header.frame_id = "panda_leftfinger"
+    #box_pose.pose.orientation.w = 1.0
+    #box_name = "box"
+    #scene.add_box(box_name, box_pose, size=(0.1, 0.1, 0.1))
+
+    ## END_SUB_TUTORIAL
+    # Copy local variables back to class variables. In practice, you should use the class
+    # variables directly unless you have a good reason not to.
+    self.box_name=box_name
+    return self.wait_for_state_update(box_is_known=True, timeout=timeout)
+
+  def attach_box(self, timeout=4):
+    # Copy class variables to local variables to make the web tutorials more clear.
+    # In practice, you should use the class variables directly unless you have a good
+    # reason not to.
+    box_name = self.box_name
+    robot = self.robot
+    scene = self.scene
+    eef_link = self.eef_link
+    group_names = self.group_names
+
+    ## BEGIN_SUB_TUTORIAL attach_object
+    ##
+    ## Attaching Objects to the Robot
+    ## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ## Next, we will attach the box to the Panda wrist. Manipulating objects requires the
+    ## robot be able to touch them without the planning scene reporting the contact as a
+    ## collision. By adding link names to the ``touch_links`` array, we are telling the
+    ## planning scene to ignore collisions between those links and the box. For the Panda
+    ## robot, we set ``grasping_group = 'hand'``. If you are using a different robot,
+    ## you should change this value to the name of your end effector group name.
+    grasping_group = u'hand'
+    touch_links = robot.get_link_names(group=grasping_group)
+    scene.attach_box(eef_link, box_name, touch_links=touch_links)
+    ## END_SUB_TUTORIAL
+
+    # We wait for the planning scene to update.
+    return self.wait_for_state_update(box_is_attached=True, box_is_known=False, timeout=timeout)
+
+  def detach_box(self, timeout=4):
+    # Copy class variables to local variables to make the web tutorials more clear.
+    # In practice, you should use the class variables directly unless you have a good
+    # reason not to.
+    box_name = self.box_name
+    scene = self.scene
+    eef_link = self.eef_link
+
+    ## BEGIN_SUB_TUTORIAL detach_object
+    ##
+    ## Detaching Objects from the Robot
+    ## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ## We can also detach and remove the object from the planning scene:
+    scene.remove_attached_object(eef_link, name=box_name)
+    ## END_SUB_TUTORIAL
+
+    # We wait for the planning scene to update.
+    return self.wait_for_state_update(box_is_known=True, box_is_attached=False, timeout=timeout)
+
+  def remove_box(self, timeout=4):
+    # Copy class variables to local variables to make the web tutorials more clear.
+    # In practice, you should use the class variables directly unless you have a good
+    # reason not to.
+    box_name = self.box_name
+    scene = self.scene
+
+    ## BEGIN_SUB_TUTORIAL remove_object
+    ##
+    ## Removing Objects from the Planning Scene
+    ## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ## We can remove the box from the world.
+    scene.remove_world_object(box_name)
+
+    ## **Note:** The object must be detached before we can remove it from the world
+    ## END_SUB_TUTORIAL
+
+    # We wait for the planning scene to update.
+    return self.wait_for_state_update(box_is_attached=False, box_is_known=False, timeout=timeout)
+
+  def publish_markers(self):
+    # Generate the marker array
+    markers = self.markers
+    self.marker_pub.publish(markers)
+    
+  def run(self):
+    cartesian_plan, fraction = self.plan_cartesian_path(scale=0.01)
+    #while not rospy.is_shutdown():
+
+    try:
+      pass
+      self.publish_markers()
+      # self.point_cloud_publisher()
+      # print(self.publish_markers)
+      # self.go_to_joint_state()
+      # self.go_to_pose_goal()
+      # self.move_between_poses(self.waypoints)
+      self.move_through_waypoints(self.waypoints)
+      # current_pose = self.group.get_current_pose().pose
+      # print(current_pose)
+      # self.display_trajectory(cartesian_plan)
+      # self.execute_plan(cartesian_plan)
+      # print(self.execute_plan)
+      # print(self.plan_cartesian_path)
+      # print(cartesian_plan)
+      # print(self.waypoints)
+      # print()
+    except rospy.ROSInterruptException:
+      pass
+    except KeyboardInterrupt:
+      pass
+     # self.rate.sleep()
+
+if __name__ == u'__main__':
+    node = MoveGroupPythonIntefaceTutorial()
+    node.run()

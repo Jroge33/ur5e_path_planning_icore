@@ -1,0 +1,23 @@
+<launch>
+	<node pkg="my_tutorial" type="my_tutorial_node.py" name="my_tutorial_node" output="screen">
+		
+		<!--changing robot_description to this because moveitcommander looing for robot_description -->
+		<!--<remap from="robot_description" to="/robot/robot_description" />
+		<remap from="robot_description_semantic" to="/robot/robot_description_semantic" />
+		<remap from="get_planning_scene" to="/robot/get_planning_scene" />
+		<remap from="apply_planning_scene" to="/robot/apply_planning_scene" />
+		<remap from="move_group" to="/robot/move_group" />
+		<remap from="pickup" to="/robot/pickup" />
+		<remap from="place" to="/robot/place" />
+		<remap from="execute_trajectory" to="/robot/execute_trajectory" />
+		<remap from="joint_states" to="/robot/arm/joint_states" />
+		<remap from="visualization_marker_array" to="/robot/visualization_marker_array" />
+		<remap from="scaled_pos_traj_controller" to="/robot/arm/scaled_pos_traj_controller" />
+		<remap from="trajectory_execution_event" to="/robot/trajectory_execution_event" />
+		<remap from="/display_robot_state" to="/robot/display_robot_state" />
+		<!-<remap from="move_group/execute_trajectory" to="move_group/trajectory_execution" />-->
+		<!--remap from="move_group/trajectory_execution" to="/robot/move_group/trajectory_execution" />-->
+
+	</node>
+
+</launch>
